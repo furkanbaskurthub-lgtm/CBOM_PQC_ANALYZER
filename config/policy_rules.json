@@ -1,0 +1,63 @@
+{
+  "policy_version": "1.0.0",
+  "global": {
+    "min_confidence": 0.55,
+    "min_field_confidence_avg": 0.5,
+    "max_unknown_ratio": 0.5,
+    "min_evidence_count": 1,
+    "allow_require_review_in_training": false
+  },
+  "penalties": {
+    "high": 35,
+    "medium": 15,
+    "low": 5
+  },
+  "quality_weights": {
+    "confidence": 0.45,
+    "field_confidence": 0.25,
+    "knownness": 0.15,
+    "evidence": 0.15
+  },
+  "quality_tiers": {
+    "high_min": 80,
+    "medium_min": 60
+  },
+  "issue_policies": {
+    "CROSS_ALGORITHM_CONTAMINATION_MODE_REMOVED": {
+      "severity": "high",
+      "action": "drop"
+    },
+    "INVALID_MODE_FOR_SYMMETRIC": {
+      "severity": "high",
+      "action": "drop"
+    },
+    "MODE_REMOVED_FOR_ASYMMETRIC": {
+      "severity": "medium",
+      "action": "keep_with_penalty"
+    },
+    "PADDING_REMOVED_FOR_AEAD_OR_STREAM_MODE": {
+      "severity": "low",
+      "action": "keep_with_penalty"
+    },
+    "PADDING_MAY_APPLY_BUT_NOT_DETECTED": {
+      "severity": "low",
+      "action": "keep_with_penalty"
+    },
+    "MODE_NOT_IN_KNOWN_SET": {
+      "severity": "medium",
+      "action": "require_review"
+    },
+    "NOT_DETECTED": {
+      "severity": "low",
+      "action": "keep_with_penalty"
+    },
+    "UNKNOWN_CATEGORY": {
+      "severity": "medium",
+      "action": "require_review"
+    },
+    "UNKNOWN": {
+      "severity": "medium",
+      "action": "require_review"
+    }
+  }
+}

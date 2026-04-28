@@ -158,6 +158,35 @@ QuickFIX örneği için run klasöründe şu dosyalar üretilir:
 - `quickfix_dataset_dropped.jsonl`
 - `quickfix_batch_summary.json`
 
+## Output Klasor Yapisi
+
+Yeni surumde her analiz calismasi icin output altinda ayri bir run klasoru olusturulur.
+Boylece JSON dosyalari tek klasorde birikmez ve hangi dosyanin hangi analize ait oldugu kolayca bulunur.
+
+Ornek:
+
+```text
+output/
+	run_20260426_153012_repo-default-source/
+		repo_cbom_cyclonedx.json
+		repo_cbom_confirmed.json
+		repo_cbom_context.json
+		repo_labeled_v2.json
+		repo_dataset_training.jsonl
+		repo_dataset_review.jsonl
+		repo_dataset_policy_drop.jsonl
+		repo_dataset_quality_reject.jsonl
+		repo_dataset_dropped.jsonl
+		repo_batch_summary.json
+```
+
+GitHub/local repo batch taramalarinda CycloneDX CBOM dosyasi
+prefix_cbom_cyclonedx.json adi ile ayni run klasorune yazilir.
+
+Ek olarak iki katmanli CBOM ciktilari da uretilir:
+
+- prefix_cbom_confirmed.json: Dogrudan API/operasyon kanitlariyla tespit edilen kripto
+- prefix_cbom_context.json: Import/context sinyallerinden gelen (daha zayif) kripto kanitlari
 ## Karşılaştığım Sorunlar
 
 - `bcrypt.dll` ilk başta 0.0 sonuç veriyordu. PE export taraması ve BCrypt mapping ile çözdüm.

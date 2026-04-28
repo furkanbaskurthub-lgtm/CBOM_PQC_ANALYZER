@@ -6,9 +6,11 @@ Tüm modülleri orkestrasyonla yönetir
 import json
 import os
 import uuid
+import hashlib
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set, Tuple
+from dataclasses import asdict
 from dotenv import load_dotenv
 
 from models.crypto_schema import (
@@ -16,13 +18,17 @@ from models.crypto_schema import (
     CryptoFunction, calculate_risk_score, NIST_PQC_RISK_MAP
 )
 from analyzer.static_engine import StaticAnalysisEngine
-from analyzer.llm_engine import LLMAnalysisEngine, LLMConfig
+from analyzer.llm_engine import LLMAnalysisEngine, LLMConfig, AnalysisResult
+from analyzer.validation_engine import ValidationEngine
+from analyzer.decision_engine import DecisionEngine
+from models.label_schema import EvidenceItem, LabeledCryptoAsset
+from utils.dataset_builder import DEFAULT_INSTRUCTION, build_instruction_records, write_jsonl
 
 
 class PQCReadyAnalyzer:
     """Ana Analyzer Sınıfı - Tüm araçları orkestrasyonla yönetir"""
     
-    def __init__(self, output_dir: str = "output"):
+    def __init__(self, output_dir: str = "output", llm_cache_enabled: bool = True):
         """
         Analyzer'ı başlat
         
@@ -63,10 +69,23 @@ class PQCReadyAnalyzer:
             llm_config = LLMConfig(provider="mock")
 
         self.llm_engine = LLMAnalysisEngine(llm_config)
+        self.validation_engine = ValidationEngine()
+        self.decision_engine = DecisionEngine()
+
+        self.llm_cache_enabled = llm_cache_enabled
+        self.llm_snippet_cache: Dict[str, Dict[str, Any]] = {}
         
         self.cbom_results: Dict[str, CryptoBOM] = {}
+        self._last_static_results: Dict[str, Dict[str, Any]] = {}
     
-    def analyze_target(self, target_path: str, use_llm: bool = False) -> CryptoBOM:
+    def analyze_target(
+        self,
+        target_path: str,
+        use_llm: bool = False,
+        llm_candidate_only: bool = False,
+        llm_min_confidence: float = 0.0,
+        llm_max_snippets: int = 4,
+    ) -> CryptoBOM:
         """
         Hedef dosyayı analiz et
         
@@ -119,23 +138,168 @@ class PQCReadyAnalyzer:
         
         # LLM analizi yapılırsa kaynak kod veya binary için zenginleştirme uygula
         if use_llm:
-            if static_results["file_type"] == "TEXT":
-                self._enhance_with_llm(cbom, target)
-            elif static_results["file_type"] in ["ELF", "PE", "BINARY"]:
-                self._enhance_binary_with_llm(cbom, target, static_results)
+            allow_llm = True
+            if llm_candidate_only:
+                allow_llm = self._is_llm_candidate(
+                    cbom,
+                    static_results,
+                    llm_min_confidence=llm_min_confidence,
+                )
+
+            if allow_llm:
+                if static_results["file_type"] == "TEXT":
+                    self._enhance_with_llm(cbom, target, max_snippets=llm_max_snippets)
+                elif static_results["file_type"] in ["ELF", "PE", "BINARY"]:
+                    self._enhance_binary_with_llm(cbom, target, static_results)
         
         # Özet ve risk puanlaması hesapla
         self._compute_summary(cbom)
         
         # Sonuç kaydet
         self.cbom_results[cbom_ref] = cbom
+        self._last_static_results[cbom_ref] = static_results
         
         return cbom
+
+    def generate_labeled_assets(
+        self,
+        cbom: CryptoBOM,
+        static_results: Optional[Dict[str, Any]] = None,
+    ) -> List[LabeledCryptoAsset]:
+        """CBOM varlıklarını V2 etiketli şemaya dönüştür ve doğrula."""
+        if static_results is None:
+            static_results = self._last_static_results.get(cbom.bom_ref, {})
+
+        labeled_assets: List[LabeledCryptoAsset] = []
+        for asset in cbom.crypto_assets:
+            evidence_items = self._collect_asset_evidence(asset.algorithm.name, static_results)
+            labeled = self.validation_engine.validate_asset(asset, evidence_items)
+            labeled.decision = self.decision_engine.evaluate_asset(labeled)
+            labeled_assets.append(labeled)
+
+        return labeled_assets
+
+    def _collect_asset_evidence(self, algorithm: str, static_results: Dict[str, Any]) -> List[EvidenceItem]:
+        """Statik analiz çıktısından algoritma bazlı evidence kayıtları üret."""
+        raw_evidence = static_results.get("evidence", [])
+        evidence_items: List[EvidenceItem] = []
+        seen: Set[Tuple[Any, ...]] = set()
+
+        for item in raw_evidence:
+            if item.get("algorithm") != algorithm:
+                continue
+
+            dedup_key = (
+                item.get("file_path"),
+                item.get("line_start"),
+                item.get("line_end"),
+                item.get("snippet"),
+                item.get("function_name"),
+                item.get("source_type"),
+            )
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            evidence_items.append(
+                EvidenceItem(
+                    file_path=item.get("file_path", "unknown"),
+                    language=item.get("language"),
+                    line_start=item.get("line_start"),
+                    line_end=item.get("line_end"),
+                    function_name=item.get("function_name"),
+                    snippet=item.get("snippet"),
+                    context_before=item.get("context_before"),
+                    context_after=item.get("context_after"),
+                    detector=item.get("detector", "static"),
+                    source_type=item.get("source_type", "source"),
+                )
+            )
+
+        if not evidence_items:
+            evidence_items.append(
+                EvidenceItem(
+                    file_path=static_results.get("file", "unknown"),
+                    detector="fallback",
+                    source_type="source",
+                    snippet=f"Detected algorithm: {algorithm}",
+                )
+            )
+
+        return evidence_items
+
+    def save_labeled_json(
+        self,
+        labeled_assets: List[LabeledCryptoAsset],
+        filename: str = "labeled_assets_v2.json",
+    ) -> Path:
+        """V2 etiketli varlıkları JSON dosyasına kaydet."""
+        output_file = self.output_dir / filename
+        payload = [asset.model_dump() for asset in labeled_assets]
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        return output_file
+
+    def export_instruction_dataset(
+        self,
+        labeled_assets: List[LabeledCryptoAsset],
+        output_filename: str = "crypto_instruction_dataset.jsonl",
+        instruction: Optional[str] = None,
+        training_only: bool = False,
+    ) -> Path:
+        """Labeled çıktılardan LLM instruction JSONL dataset üret."""
+        if training_only:
+            labeled_assets = [a for a in labeled_assets if a.decision and a.decision.include]
+        records = build_instruction_records(labeled_assets, instruction=instruction or DEFAULT_INSTRUCTION)
+        output_file = self.output_dir / output_filename
+        write_jsonl(records, str(output_file))
+        return output_file
+
+    def split_labeled_assets_by_decision(self, labeled_assets: List[LabeledCryptoAsset]) -> Dict[str, List[LabeledCryptoAsset]]:
+        """Varlıkları decision çıktısına göre training/review/dropped olarak ayır."""
+        return self.decision_engine.split_by_decision(labeled_assets)
+
+    def export_decision_datasets(
+        self,
+        labeled_assets: List[LabeledCryptoAsset],
+        instruction: Optional[str] = None,
+    ) -> Dict[str, Path]:
+        """Decision katmanına göre ayrılmış dataset dosyalarını JSONL olarak kaydet."""
+        split = self.split_labeled_assets_by_decision(labeled_assets)
+        instruction_text = instruction or DEFAULT_INSTRUCTION
+
+        training_records = build_instruction_records(split["training"], instruction=instruction_text)
+        review_records = build_instruction_records(split["review"], instruction=instruction_text)
+        policy_drop_records = build_instruction_records(split.get("policy_drop", []), instruction=instruction_text)
+        quality_reject_records = build_instruction_records(split.get("quality_reject", []), instruction=instruction_text)
+        dropped_records = build_instruction_records(split["dropped"], instruction=instruction_text)
+
+        output_paths = {
+            "training": self.output_dir / "dataset_training.jsonl",
+            "review": self.output_dir / "dataset_review.jsonl",
+            "policy_drop": self.output_dir / "dataset_policy_drop.jsonl",
+            "quality_reject": self.output_dir / "dataset_quality_reject.jsonl",
+            "dropped": self.output_dir / "dataset_dropped.jsonl",
+        }
+
+        write_jsonl(training_records, str(output_paths["training"]))
+        write_jsonl(review_records, str(output_paths["review"]))
+        write_jsonl(policy_drop_records, str(output_paths["policy_drop"]))
+        write_jsonl(quality_reject_records, str(output_paths["quality_reject"]))
+        write_jsonl(dropped_records, str(output_paths["dropped"]))
+
+        return output_paths
     
     def _infer_primitive_type(self, algo_name: str) -> PrimitiveType:
         """Algoritma adından ilkel türü çıkar"""
         algo_lower = algo_name.lower()
         
+        if any(x in algo_lower for x in ["csprng", "random"]):
+            return PrimitiveType.KEY_DERIVATION
+        if any(x in algo_lower for x in ["pbkdf2", "bcrypt", "argon2", "scrypt", "kdf"]):
+            return PrimitiveType.KEY_DERIVATION
+        if any(x in algo_lower for x in ["cipher", "encrypt", "decrypt"]):
+            return PrimitiveType.BLOCK_CIPHER
         if any(x in algo_lower for x in ["rsa", "ecc", "ecdsa", "ecdh"]):
             return PrimitiveType.ASYMMETRIC
         elif any(x in algo_lower for x in ["aes", "des", "rc4"]):
@@ -154,6 +318,10 @@ class PQCReadyAnalyzer:
         algo_lower = algo_name.lower()
         functions = []
         
+        if any(x in algo_lower for x in ["csprng", "random"]):
+            functions = [CryptoFunction.RANDOM_NUMBER_GENERATION]
+        if any(x in algo_lower for x in ["pbkdf2", "bcrypt", "argon2", "scrypt", "kdf"]):
+            functions = [CryptoFunction.KEY_DERIVATION]
         if any(x in algo_lower for x in ["aes", "des", "rc4"]):
             functions = [CryptoFunction.ENCRYPT, CryptoFunction.DECRYPT]
         elif any(x in algo_lower for x in ["rsa", "ecc"]):
@@ -175,8 +343,47 @@ class PQCReadyAnalyzer:
             return "medium"
         else:
             return "low"
+
+    def _is_llm_candidate(self, cbom: CryptoBOM, static_results: Dict[str, Any], llm_min_confidence: float = 0.0) -> bool:
+        """LLM'i sadece aday dosyalarda çalıştırmak için basit ve hızlı bir filtre."""
+        if not cbom.crypto_assets:
+            return False
+
+        if llm_min_confidence <= 0.0:
+            return True
+
+        # Daha düşük güvenli veya generic bulgular LLM doğrulaması için adaydır.
+        for asset in cbom.crypto_assets:
+            algo = asset.algorithm.name.lower()
+            if asset.confidence <= llm_min_confidence:
+                return True
+            if "generic" in algo or "unknown" in algo:
+                return True
+
+        # Ek koruma: çok sayıda sembol varsa bağlamsal LLM değerli olabilir.
+        if len(static_results.get("symbols", [])) >= 8:
+            return True
+
+        return False
+
+    def _llm_cache_key(self, snippet: str) -> str:
+        payload = f"{self.llm_engine.config.provider}|{self.llm_engine.config.model}|{snippet}"
+        return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _analyze_snippet_with_cache(self, snippet: str) -> AnalysisResult:
+        if not self.llm_cache_enabled:
+            return self.llm_engine.analyze_code_block(snippet)
+
+        key = self._llm_cache_key(snippet)
+        cached = self.llm_snippet_cache.get(key)
+        if cached:
+            return AnalysisResult(**cached)
+
+        result = self.llm_engine.analyze_code_block(snippet)
+        self.llm_snippet_cache[key] = asdict(result)
+        return result
     
-    def _enhance_with_llm(self, cbom: CryptoBOM, target: Path):
+    def _enhance_with_llm(self, cbom: CryptoBOM, target: Path, max_snippets: int = 4):
         """LLM analizi ile CBOM'u zenginleştir"""
         try:
             with open(target, 'r', encoding='utf-8') as f:
@@ -185,14 +392,13 @@ class PQCReadyAnalyzer:
             # İçeriği parçalara böl
             max_size = 2000
             snippets = [content[i:i+max_size] for i in range(0, len(content), max_size)]
-            max_snippets = 4
             
             # Her snippet'i analiz et
             for snippet in snippets[:max_snippets]:
                 if len(snippet.strip()) < 50:
                     continue
                 
-                result = self.llm_engine.analyze_code_block(snippet)
+                result = self._analyze_snippet_with_cache(snippet)
                 
                 if result.success and result.algorithm:
                     self._upsert_llm_asset(cbom, result, source="source-code")
@@ -222,7 +428,7 @@ class PQCReadyAnalyzer:
             ]
 
             snippet = "\n".join(summary_lines)
-            result = self.llm_engine.analyze_code_block(snippet)
+            result = self._analyze_snippet_with_cache(snippet)
             if result.success and result.algorithm:
                 self._upsert_llm_asset(cbom, result, source="binary-llm")
 
@@ -392,11 +598,16 @@ class PQCReadyAnalyzer:
 # CLI Test
 if __name__ == "__main__":
     import sys
+    import re
     
     # Kullanım: python main.py <file_path>
     if len(sys.argv) > 1:
-        analyzer = PQCReadyAnalyzer()
         target = sys.argv[1]
+
+        target_name = Path(target).name
+        safe_target = re.sub(r"[^a-zA-Z0-9._-]+", "-", target_name).strip("-._") or "target"
+        run_dir = Path("output") / f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{safe_target}"
+        analyzer = PQCReadyAnalyzer(output_dir=str(run_dir))
         
         print(f"Analiz ediliyor: {target}")
         try:

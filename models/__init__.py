@@ -10,6 +10,22 @@ from .crypto_schema import (
     calculate_risk_score,
     NIST_PQC_RISK_MAP,
 )
+from .label_schema import (
+    Category,
+    ValueState,
+    PqcStatus,
+    ScoredValue,
+    UsageItem,
+    EvidenceItem,
+    ValidationResult,
+    DecisionAction,
+    SeverityLevel,
+    QualityTier,
+    IssueDecision,
+    DecisionResult,
+    LabeledCryptoAsset,
+    InstructionRecord,
+)
 
 __all__ = [
     "PrimitiveType",
@@ -20,4 +36,18 @@ __all__ = [
     "RiskAssessment",
     "calculate_risk_score",
     "NIST_PQC_RISK_MAP",
+    "Category",
+    "ValueState",
+    "PqcStatus",
+    "ScoredValue",
+    "UsageItem",
+    "EvidenceItem",
+    "ValidationResult",
+    "DecisionAction",
+    "SeverityLevel",
+    "QualityTier",
+    "IssueDecision",
+    "DecisionResult",
+    "LabeledCryptoAsset",
+    "InstructionRecord",
 ]

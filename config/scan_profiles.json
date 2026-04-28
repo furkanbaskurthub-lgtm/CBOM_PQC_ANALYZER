@@ -1,0 +1,70 @@
+{
+  "profiles": {
+    "fineract-java": {
+      "description": "Apache Fineract icin Java odakli kripto tarama profili",
+      "include_globs": ["**/*.java"],
+      "exclude_globs": [
+        "**/src/test/**",
+        "**/target/**",
+        "**/build/**",
+        "**/.git/**",
+        "**/node_modules/**",
+        "**/generated/**",
+        "**/db/migrations/**",
+        "**/docs/**"
+      ],
+      "max_files": 12000,
+      "output_prefix": "fineract"
+    },
+    "default-source": {
+      "description": "Genel kaynak kod tarama profili",
+      "include_globs": [
+        "**/*.py",
+        "**/*.java",
+        "**/*.c",
+        "**/*.cpp",
+        "**/*.h",
+        "**/*.hpp",
+        "**/*.go",
+        "**/*.js",
+        "**/*.ts"
+      ],
+      "exclude_globs": [
+        "**/.git/**",
+        "**/node_modules/**",
+        "**/target/**",
+        "**/build/**",
+        "**/dist/**",
+        "**/vendor/**",
+        "**/__pycache__/**"
+      ],
+      "max_files": 20000,
+      "output_prefix": "repo"
+    },
+    "quickfix-cpp": {
+      "description": "QuickFIX C++ odaklı profil - SSL/OpenSSL kaynaklarını hedefler",
+      "include_globs": [
+        "src/**/**/*.cpp",
+        "src/**/**/*.cc",
+        "src/**/**/*.c",
+        "src/**/**/*.h",
+        "src/**/**/*.hpp",
+        "m4/**",
+        "doc/**",
+        "examples/**",
+        "src/**/**/*.in",
+        "src/**/**/*.am"
+      ],
+      "exclude_globs": [
+        "**/.git/**",
+        "**/build/**",
+        "**/dist/**",
+        "**/vendor/**",
+        "**/test/**",
+        "**/examples/build/**"
+      ],
+      "max_files": 8000,
+      "output_prefix": "quickfix"
+    }
+  }
+}
